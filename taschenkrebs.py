@@ -124,34 +124,62 @@ def ensure_label(service):
     return new_label['id']
 
 def generate_map():
-    # 1) Read the master CSV and pull out the latest per buoy
-    df = pd.read_csv(
-        MASTER_CSV,
-        parse_dates=['date_UTC'],
-        date_format='%d-%b-%Y %H:%M:%S',
-        dtype={'D_number': str},
-        skipinitialspace=True,
-        encoding='utf-8-sig'
-    )
-    df['D_number'] = df['D_number'].str.strip()
-    latest = (
-        df.sort_values('date_UTC')
-          .groupby('D_number', as_index=False)
-          .last()
-    )
-
-    # 2) Build a Folium map centered on the mean location
-    center = [ latest['Latitude'].mean(), latest['Longitude'].mean() ]
+    # 1) Load home positions
+    home_df = load_home_positions().reset_index()
+    # 2) Try to load the pre-computed latest positions
+    lp = os.path.join(BASE_DIR, 'latest_positions.csv')
+    if os.path.exists(lp):
+        df = pd.read_csv(
+            lp,
+            parse_dates=['date_UTC'],
+            date_format='%d-%b-%Y %H:%M:%S'
+        )
+        df['D_number'] = df['D_number'].astype(str).str.strip()
+        latest = df
+    else:
+        # fallback: read full MASTER_CSV and compute latest
+        df = pd.read_csv(
+            MASTER_CSV,
+            parse_dates=['date_UTC'],
+            date_format='%d-%b-%Y %H:%M:%S',
+            dtype={'D_number': str},
+            skipinitialspace=True,
+            encoding='utf-8-sig'
+        )
+        df['D_number'] = df['D_number'].str.strip()
+        latest = (
+            df.sort_values('date_UTC')
+              .groupby('D_number', as_index=False)
+              .last()
+        )
+    # 3) Build a Folium map centered on the mean of home + current
+    all_lats = list(home_df['lat_home']) + list(latest['Latitude'])
+    all_lons = list(home_df['lon_home']) + list(latest['Longitude'])
+    center = [sum(all_lats) / len(all_lats), sum(all_lons) / len(all_lons)]
     m = folium.Map(location=center, zoom_start=6)
-
-    # 3) Add one marker per buoy
-    for _, row in latest.iterrows():
-        folium.Marker(
-            [row['Latitude'], row['Longitude']],
-            popup=f"<b>{row['D_number']}</b><br>{row['date_UTC']}"
+    # 4) Plot home positions in red
+    for _, row in home_df.iterrows():
+        folium.CircleMarker(
+            location=[row.lat_home, row.lon_home],
+            radius=6,
+            color='red',
+            fill=True,
+            fill_color='red',
+            fill_opacity=0.7,
+            popup=f"{row.D_number} (home)"
         ).add_to(m)
-
-    # 4) Save to HTML in your script folder
+    # 5) Plot current positions in blue
+    for _, row in latest.iterrows():
+        folium.CircleMarker(
+            location=[row['Latitude'], row['Longitude']],
+            radius=6,
+            color='blue',
+            fill=True,
+            fill_color='blue',
+            fill_opacity=0.7,
+            popup=f"{row['D_number']}<br>{row['date_UTC']}"
+        ).add_to(m)
+    # 6) Save to HTML in your script folder
     out = os.path.join(BASE_DIR, MAP_HTML)
     m.save(out)
     #log(f"Map updated: {out}")
@@ -288,7 +316,15 @@ def fetch_and_append():
     if any_processed:
         # 1) Update MAP_HTML
         generate_map()
-        
+        # 2) also write out the small latest_positions.csv
+        latest = (
+            pd.read_csv(MASTER_CSV, parse_dates=['date_UTC'])
+              .sort_values('date_UTC')
+              .groupby('D_number', as_index=False)
+              .last()[['D_number','Latitude','Longitude','date_UTC']]
+        )
+        latest.to_csv(os.path.join(BASE_DIR, 'latest_positions.csv'),
+                      index=False)
         # 2) copy into your GitHub Pages repo
         repo_dir = os.path.join(BASE_DIR, REPO)
         # HTML -> docs/index.html
