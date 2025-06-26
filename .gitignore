@@ -10,3 +10,4 @@ uploader-key.json
 credential.json
 token.json
 alerted.json
+authorize.py
