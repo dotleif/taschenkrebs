@@ -6,6 +6,9 @@ export PATH="/gpfs/home/bockelma/.local/bin:/gpfs/home/bockelma/opt/python3/bin:
 # 2) Ensure Python can import from your user site‐packages
 export PYTHONPATH="/gpfs/home/bockelma/.local/lib/python3/site-packages:$PYTHONPATH"
 
+# 3) Let the linker find libpython3.11.so.1.0
+export LD_LIBRARY_PATH="/gpfs/home/bockelma/opt/python3/lib:$LD_LIBRARY_PATH"
+
 # 3) Go to the script folder
 cd /gpfs/work/bockelma/data/THUENEN/TASCHENKREBS
 
