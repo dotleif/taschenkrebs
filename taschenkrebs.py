@@ -25,10 +25,13 @@ from googleapiclient.errors import HttpError
 # ──────────────────────────────────────────────────────────────────────────────
 SCOPES           = ['https://www.googleapis.com/auth/gmail.modify']
 BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
-TOKEN_FILE       = os.path.join(BASE_DIR, 'token.json')
-MASTER_CSV       = os.path.join(BASE_DIR, 'drifters_hereon.csv')
+PY_SCRIPT        = 'taschenkrebs.py'
+CSV_FILE         = 'drifters_hereon.csv'
 MAP_HTML         = 'drifters_hereon_map.html'
 PROCESSED_LABEL  = 'Drifter_Hereon'
+REPO             = 'taschenkrebs'
+TOKEN_FILE       = os.path.join(BASE_DIR, 'token.json')
+MASTER_CSV       = os.path.join(BASE_DIR, CSV_FILE)
 ALERT_THRESHOLD  = 50.0  # meters
 NOTIFY_EMAIL     = 'frank-detlef.bockelmann@hereon.de'  # adjust as needed
 ALERT_LOG_FILE   = os.path.join(BASE_DIR, 'alerted.json')
@@ -93,8 +96,12 @@ def generate_map():
     df = pd.read_csv(
         MASTER_CSV,
         parse_dates=['date_UTC'],
-        date_format='%d-%b-%Y %H:%M:%S'
+        date_format='%d-%b-%Y %H:%M:%S',
+        dtype={'D_number': str},
+        skipinitialspace=True,
+        encoding='utf-8-sig'
     )
+    df['D_number'] = df['D_number'].str.strip()
     latest = (
         df.sort_values('date_UTC')
           .groupby('D_number', as_index=False)
@@ -176,12 +183,23 @@ def fetch_and_append():
                 df = pd.read_csv(
                     io.BytesIO(raw_data), 
                     parse_dates=['date_UTC'],
-                    date_format='%d-%b-%Y %H:%M:%S'  # e.g. 17-Jun-2025 14:31:39
+                    date_format='%d-%b-%Y %H:%M:%S',    # e.g. 17-Jun-2025 14:31:39
+                    dtype={'D_number': str},            # ← force string
+                    skipinitialspace=True,              # in case of stray spaces
+                    encoding='utf-8-sig'
                 )
+                df['D_number'] = df['D_number'].str.strip()  # clean whitespace
 
                 # Compute alerts if master exists
                 if os.path.exists(MASTER_CSV):
-                    hist = pd.read_csv(MASTER_CSV, parse_dates=['date_UTC'])
+                    hist = pd.read_csv(
+                        MASTER_CSV, 
+                        parse_dates=['date_UTC'],
+                        dtype={'D_number': str},        # force string here too
+                        skipinitialspace=True,
+                        encoding='utf-8-sig'
+                    )
+                    hist['D_number'] = hist['D_number'].str.strip()
                     home = (
                         hist.sort_values('date_UTC')
                             .groupby('D_number', as_index=False)
@@ -242,16 +260,16 @@ def fetch_and_append():
         generate_map()
         
         # 2) copy into your GitHub Pages repo
-        repo_dir = os.path.join(BASE_DIR, 'taschenkrebs')
+        repo_dir = os.path.join(BASE_DIR, REPO)
         # HTML -> docs/index.html
         src_html = os.path.join(BASE_DIR, MAP_HTML)
         dst_html = os.path.join(repo_dir, 'docs', 'index.html')
         # CSV -> root of repo
         src_csv = MASTER_CSV
-        dst_csv = os.path.join(repo_dir, 'taschenkrebs.csv')
+        dst_csv = os.path.join(repo_dir, CSV_FILE)
         # .py script
-        src_py = 'taschenkrebs.py'
-        dst_py = os.path.join(repo_dir, 'taschenkrebs.py')
+        src_py = PY_SCRIPT
+        dst_py = os.path.join(repo_dir, PY_SCRIPT)
         for src, dst in ((src_html, dst_html), 
                          (src_csv, dst_csv),
                          (src_py, dst_py)):
@@ -260,7 +278,7 @@ def fetch_and_append():
         # 3) commit & push
         commit_msg = f"Auto-update {datetime.now():%Y-%m-%d %H:%M:%S'}"
         cmds = [
-            ['git', 'add', 'docs/index.html', 'taschenkrebs.csv', 'taschenkrebs.py'],
+            ['git', 'add', 'docs/index.html', CSV_FILE, PY_SCRIPT],
             ['git', 'commit', '-m', commit_msg],
             ['git', 'push', 'origin', 'main'],
         ]
