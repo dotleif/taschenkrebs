@@ -32,6 +32,7 @@ PROCESSED_LABEL  = 'Drifter_Hereon'
 REPO             = 'taschenkrebs'
 TOKEN_FILE       = os.path.join(BASE_DIR, 'token.json')
 MASTER_CSV       = os.path.join(BASE_DIR, CSV_FILE)
+HOME_CSV         = os.path.join(BASE_DIR, 'home_positions.csv')
 ALERT_THRESHOLD  = 50.0  # meters
 NOTIFY_EMAIL     = 'frank-detlef.bockelmann@hereon.de'  # adjust as needed
 ALERT_LOG_FILE   = os.path.join(BASE_DIR, 'alerted.json')
@@ -45,6 +46,37 @@ def log(msg: str):
     """Print a timestamped message."""
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{ts}] {msg}")
+
+def load_home_positions():
+    if os.path.exists(HOME_CSV):
+        home = pd.read_csv(
+            HOME_CSV,
+            dtype={'D_number': str},
+            skipinitialspace=True
+        )
+    else:
+        # First run: derive home positions from the current MASTER_CSV
+        # by taking the earliest record per buoy
+        hist = pd.read_csv(
+            MASTER_CSV,
+            parse_dates=['date_UTC'],
+            date_format='%d-%b-%Y %H:%M:%S',
+            dtype={'D_number': str},
+            skipinitialspace=True,
+            encoding='utf-8-sig'
+        )
+        hist['D_number'] = hist['D_number'].str.strip()
+        home = (
+            hist.sort_values('date_UTC')
+                .groupby('D_number', as_index=False)
+                .first()[['D_number','Latitude','Longitude']]
+                .rename(columns={'Latitude':'lat_home','Longitude':'lon_home'})
+        )
+        home.to_csv(HOME_CSV, index=False)
+    # ensure types and cleanup
+    home['D_number'] = home['D_number'].str.strip()
+    return home.set_index('D_number')
+
 
 def haversine(lat1, lon1, lat2, lon2):
     """Calculate distance (in meters) between two lat/lon points."""
@@ -200,19 +232,17 @@ def fetch_and_append():
                         encoding='utf-8-sig'
                     )
                     hist['D_number'] = hist['D_number'].str.strip()
-                    home = (
-                        hist.sort_values('date_UTC')
-                            .groupby('D_number', as_index=False)
-                            .first()[['D_number','Latitude','Longitude']]
-                            .rename(columns={'Latitude':'lat_home','Longitude':'lon_home'})
-                    )
+
+                    home = load_home_positions()
                     current = (
                         df.sort_values('date_UTC')
                           .groupby('D_number', as_index=False)
                           .last()[['D_number','Latitude','Longitude']]
                           .rename(columns={'Latitude':'lat_current','Longitude':'lon_current'})
                     )
-                    merged = pd.merge(current, home, on='D_number')
+                    merged = home.join(
+                        current[['lat_current','lon_current']],how='inner'
+                    )
                     for _, row in merged.iterrows():
                         dist = haversine(
                             row.lat_home, row.lon_home,
