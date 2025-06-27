@@ -155,8 +155,8 @@ def generate_map():
     all_lats = list(home_df['lat_home']) + list(latest['Latitude'])
     all_lons = list(home_df['lon_home']) + list(latest['Longitude'])
     center = [sum(all_lats) / len(all_lats), sum(all_lons) / len(all_lons)]
-    m = folium.Map(location=center, zoom_start=6)
-    # 4) Plot current positions in blue
+    m = folium.Map(location=center, zoom_start=10)
+    # 4) Plot current positions
     for _, row in latest.iterrows():
         battery = row.get('batteryState', '').strip().upper()
         if battery == 'GOOD':
@@ -166,13 +166,14 @@ def generate_map():
             state = 'low'
             col = 'orange'
         else:
-            state = 'empty'
+            state = 'unknown'
             col = 'red'
         # build HTML popup
         popup_html = (
             f"<b>{row['D_number']}</b><br>"
-            f"Battery: {state}<br>"
-            f"DateTime: {row['date_UTC']}"
+            f"Status  : {state}<br>"
+            f"DateTime: {row['date_UTC']}<br>"
+            f"Distance: {row['distance_m']:.1f} m"
         )
         # render popup_html as real HTML
         popup = folium.Popup(
@@ -209,6 +210,7 @@ def generate_map():
 def fetch_and_append():
     service  = get_service()
     label_id = ensure_label(service)
+    seen_ids = set()
     # Load or init the set of buoys we’ve already alerted on
     if os.path.exists(ALERT_LOG_FILE):
         with open(ALERT_LOG_FILE) as f:
@@ -261,6 +263,8 @@ def fetch_and_append():
                     encoding='utf-8-sig'
                 )
                 df['D_number'] = df['D_number'].str.strip()  # clean whitespace
+                # remember these buoys as “seen” this batch
+                seen_ids.update(df['D_number'].tolist())
                 # filter out any records before the buoy’s activation
                 home_df = load_home_positions()
                 # build a temporary Series of activation times
@@ -363,18 +367,33 @@ def fetch_and_append():
     if any_processed:
         # 1) Update MAP_HTML
         generate_map()
-        # 2) also write out the small latest_positions.csv
-        latest = (
-            pd.read_csv(MASTER_CSV, parse_dates=['date_UTC'])
-              .sort_values('date_UTC')
-              .groupby('D_number', as_index=False)
-              .last()[['D_number',
-                       'Latitude','Longitude',
-                       'date_UTC',
-                       'batteryState']]
+        # 2) also write out the small latest_positions.csv, tagging missing buoys
+        #   a) load full history and compute last‐known per buoy
+        master = pd.read_csv(
+            MASTER_CSV,
+            parse_dates=['date_UTC'],
+            dtype={'D_number': str},
+            skipinitialspace=True,
+            encoding='utf-8-sig'
         )
-        latest.to_csv(os.path.join(BASE_DIR, 'latest_positions.csv'),
-                      index=False)
+        latest = (
+            master.sort_values('date_UTC')
+                  .groupby('D_number', as_index=False)
+                  .last()[['D_number','Latitude','Longitude','date_UTC','batteryState']]
+        )
+        home = load_home_positions().reset_index()[['D_number','lat_home','lon_home']]
+        latest = latest.merge(home, on='D_number', how='left')
+        latest['distance_m'] = latest.apply(
+            lambda r: haversine(r.lat_home, r.lon_home, r.Latitude, r.Longitude),
+            axis=1
+        )
+        # b) for any home buoy not in seen_ids, override its state
+        home = load_home_positions()
+        missing = set(home.index) - seen_ids
+        for buoy in missing:
+            latest.loc[latest['D_number']==buoy, 'batteryState'] = 'UNKNOWN'
+        #  c) write out
+        latest.to_csv(os.path.join(BASE_DIR, 'latest_positions.csv'), index=False)
         # 2) copy into your GitHub Pages repo
         repo_dir = os.path.join(BASE_DIR, REPO)
         # HTML -> docs/index.html
