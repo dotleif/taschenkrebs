@@ -13,7 +13,11 @@ import io
 import math
 import base64   
 import pandas as pd
+import json
+import folium
+import subprocess
 from datetime import datetime
+from folium import Html
 from email.mime.text import MIMEText
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -25,7 +29,6 @@ from googleapiclient.errors import HttpError
 # ──────────────────────────────────────────────────────────────────────────────
 SCOPES           = ['https://www.googleapis.com/auth/gmail.modify']
 BASE_DIR         = os.path.dirname(os.path.abspath(__file__))
-PY_SCRIPT        = 'taschenkrebs.py'
 CSV_FILE         = 'drifters_hereon.csv'
 MAP_HTML         = 'drifters_hereon_map.html'
 PROCESSED_LABEL  = 'Drifter_Hereon'
@@ -38,9 +41,7 @@ NOTIFY_EMAIL     = 'frank-detlef.bockelmann@hereon.de'  # adjust as needed
 ALERT_LOG_FILE   = os.path.join(BASE_DIR, 'alerted.json')
 # ──────────────────────────────────────────────────────────────────────────────
 
-import json
-import folium
-import subprocess
+
 
 def log(msg: str):
     """Print a timestamped message."""
@@ -48,35 +49,33 @@ def log(msg: str):
     print(f"[{ts}] {msg}")
 
 def load_home_positions():
-    if os.path.exists(HOME_CSV):
-        home = pd.read_csv(
-            HOME_CSV,
-            dtype={'D_number': str},
-            skipinitialspace=True
-        )
-    else:
-        # First run: derive home positions from the current MASTER_CSV
-        # by taking the earliest record per buoy
-        hist = pd.read_csv(
-            MASTER_CSV,
-            parse_dates=['date_UTC'],
-            date_format='%d-%b-%Y %H:%M:%S',
-            dtype={'D_number': str},
-            skipinitialspace=True,
-            encoding='utf-8-sig'
-        )
-        hist['D_number'] = hist['D_number'].str.strip()
-        home = (
-            hist.sort_values('date_UTC')
-                .groupby('D_number', as_index=False)
-                .first()[['D_number','Latitude','Longitude']]
-                .rename(columns={'Latitude':'lat_home','Longitude':'lon_home'})
-        )
-        home.to_csv(HOME_CSV, index=False)
-    # ensure types and cleanup
+    # HOME_CSV must be provided; we won’t auto-generate it.
+    if not os.path.exists(HOME_CSV):
+        raise RuntimeError(f"{HOME_CSV} not found.")
+    # Load the provided home positions file
+    home = pd.read_csv(
+        HOME_CSV,
+        dtype={'D_number': str},
+        skipinitialspace=True,
+        encoding='utf-8-sig'
+    )
+    # rename columns: keep D_number
+    # map Latitude/Longitude to lat_home/lon_home, last col date_UTC
+    home = home.rename(columns={
+        'Latitude': 'lat_home',
+        'Longitude': 'lon_home',
+        home.columns[-1]: 'date_UTC'
+    })
+    # parse the activation timestamp
+    home['date_UTC'] = pd.to_datetime(
+        home['date_UTC'],
+        format='%Y-%m-%d %H:%M:%S'
+    )
+    # strip whitespace from D_number
     home['D_number'] = home['D_number'].str.strip()
-    return home.set_index('D_number')
-
+    # set D_number as index and keep only the three needed columns
+    home = home.set_index('D_number')[['lat_home','lon_home','date_UTC']]
+    return home
 
 def haversine(lat1, lon1, lat2, lon2):
     """Calculate distance (in meters) between two lat/lon points."""
@@ -131,8 +130,8 @@ def generate_map():
     if os.path.exists(lp):
         df = pd.read_csv(
             lp,
-            parse_dates=['date_UTC'],
-            date_format='%d-%b-%Y %H:%M:%S'
+            parse_dates=['date_UTC'] #,
+            #date_format='%d-%b-%Y %H:%M:%S'
         )
         df['D_number'] = df['D_number'].astype(str).str.strip()
         latest = df
@@ -141,7 +140,7 @@ def generate_map():
         df = pd.read_csv(
             MASTER_CSV,
             parse_dates=['date_UTC'],
-            date_format='%d-%b-%Y %H:%M:%S',
+            #date_format='%d-%b-%Y %H:%M:%S',
             dtype={'D_number': str},
             skipinitialspace=True,
             encoding='utf-8-sig'
@@ -157,27 +156,50 @@ def generate_map():
     all_lons = list(home_df['lon_home']) + list(latest['Longitude'])
     center = [sum(all_lats) / len(all_lats), sum(all_lons) / len(all_lons)]
     m = folium.Map(location=center, zoom_start=6)
-    # 4) Plot home positions in red
+    # 4) Plot current positions in blue
+    for _, row in latest.iterrows():
+        battery = row.get('batteryState', '').strip().upper()
+        if battery == 'GOOD':
+            state = 'good'
+            col = 'green'
+        elif battery == 'LOW':
+            state = 'low'
+            col = 'orange'
+        else:
+            state = 'empty'
+            col = 'red'
+        # build HTML popup
+        popup_html = (
+            f"<b>{row['D_number']}</b><br>"
+            f"Battery: {state}<br>"
+            f"DateTime: {row['date_UTC']}"
+        )
+        # render popup_html as real HTML
+        popup = folium.Popup(
+            Html(popup_html, script=True),
+            max_width=250
+        )
+        # use a Font-Awesome buoy-like icon (here 'info-sign') for latest
+        icon = folium.Icon(
+            icon='info-sign',
+            prefix='glyphicon',
+            color=col
+        )
+        folium.Marker(
+            location=[row['Latitude'], row['Longitude']],
+            popup=popup,
+            icon=icon
+        ).add_to(m)   
+    # 5) Plot home positions in black
     for _, row in home_df.iterrows():
         folium.CircleMarker(
             location=[row.lat_home, row.lon_home],
             radius=6,
-            color='red',
+            color='black',
             fill=True,
-            fill_color='red',
-            fill_opacity=0.7,
+            fill_color='black',
+            fill_opacity=0.5,
             popup=f"{row.D_number} (home)"
-        ).add_to(m)
-    # 5) Plot current positions in blue
-    for _, row in latest.iterrows():
-        folium.CircleMarker(
-            location=[row['Latitude'], row['Longitude']],
-            radius=6,
-            color='blue',
-            fill=True,
-            fill_color='blue',
-            fill_opacity=0.7,
-            popup=f"{row['D_number']}<br>{row['date_UTC']}"
         ).add_to(m)
     # 6) Save to HTML in your script folder
     out = os.path.join(BASE_DIR, MAP_HTML)
@@ -187,24 +209,19 @@ def generate_map():
 def fetch_and_append():
     service  = get_service()
     label_id = ensure_label(service)
-
-
     # Load or init the set of buoys we’ve already alerted on
     if os.path.exists(ALERT_LOG_FILE):
         with open(ALERT_LOG_FILE) as f:
             alerted = json.load(f)
     else:
         alerted = {}
-
     # Fetch all unread messages IDs with subject prefix
     query = 'is:unread subject:"Drifters Hereon"'
     resp  = service.users().messages().list(userId='me', q=query).execute()
     items = resp.get('messages', [])
-
     if not items:
         print("No new messages.")
         return
-    
     # 2) For each message ID, fetch its internalDate and collect
     dated = []
     for it in items:
@@ -217,20 +234,15 @@ def fetch_and_append():
             'id':           it['id'],
             'internalDate': int(meta['internalDate'])
         })
-
     # 3) Sort oldest → newest
     dated.sort(key=lambda x: x['internalDate'])
-
     any_processed = False
-
     for entry in dated:
         msg_id = entry['id']
         msg = service.users().messages().get(
             userId='me', id=msg_id, format='full').execute()
-
         parts = msg.get('payload', {}).get('parts', [])
         processed = False
-
         for part in parts:
             fname = part.get('filename', '')
             body  = part.get('body', {})
@@ -243,12 +255,18 @@ def fetch_and_append():
                 df = pd.read_csv(
                     io.BytesIO(raw_data), 
                     parse_dates=['date_UTC'],
-                    date_format='%d-%b-%Y %H:%M:%S',    # e.g. 17-Jun-2025 14:31:39
+                    #date_format='%d-%b-%Y %H:%M:%S',    # e.g. 17-Jun-2025 14:31:39
                     dtype={'D_number': str},            # ← force string
                     skipinitialspace=True,              # in case of stray spaces
                     encoding='utf-8-sig'
                 )
                 df['D_number'] = df['D_number'].str.strip()  # clean whitespace
+                # filter out any records before the buoy’s activation
+                home_df = load_home_positions()
+                # build a temporary Series of activation times
+                activation_times = df['D_number'].map(home_df['date_UTC'])
+                # only keep rows where date_UTC > activation, without adding any column
+                df = df.loc[df['date_UTC'] > activation_times].copy()
 
                 # Compute alerts if master exists
                 if os.path.exists(MASTER_CSV):
@@ -267,28 +285,57 @@ def fetch_and_append():
                           .groupby('D_number', as_index=False)
                           .last()[['D_number','Latitude','Longitude']]
                           .rename(columns={'Latitude':'lat_current','Longitude':'lon_current'})
+                          .set_index('D_number')
                     )
                     merged = home.join(
                         current[['lat_current','lon_current']],how='inner'
                     )
-                    for _, row in merged.iterrows():
+                    for buoy, row in merged.iterrows():
                         dist = haversine(
                             row.lat_home, row.lon_home,
                             row.lat_current, row.lon_current
                         )
                         # Only alert once per buoy ever
-                        if dist > ALERT_THRESHOLD and row.D_number not in alerted:
-                            subj = f"Alert: Buoy {row.D_number} moved {dist:.1f} m"
+                        if dist > ALERT_THRESHOLD and buoy not in alerted:
+                            subj = f"Alert: Buoy {buoy} moved {dist:.1f} m"
                             body = (
-                                f"Buoy ID: {row.D_number}\n"
-                                f"Distance moved: {dist:.1f} meters\n"
+                                f"Buoy ID: {buoy}\n"
+                                f"Distance moved: {dist:.1f} meters\n"
                                 f"Home pos: ({row.lat_home:.5f}, {row.lon_home:.5f})\n"
                                 f"Current: ({row.lat_current:.5f}, {row.lon_current:.5f})"
                             )
                             send_notification(service, NOTIFY_EMAIL, NOTIFY_EMAIL, subj, body)
-                            #print(f"Sent alert for {row.D_number}: {dist:.1f} m")
-                            log(f"Sent alert for {row.D_number}: {dist:.1f} m")
-                            alerted[row.D_number] = datetime.now().isoformat()
+                            log(f"Sent alert for {buoy}: {dist:.1f} m")
+                            alerted[buoy] = datetime.now().isoformat()
+                    # Missing transmission alert when any home position is not in this 
+                    # batch's current positions.
+                    # Identify this batch by its internalDate and subject and
+                    # embeds both into the alert subject and body.
+                    batch_time = datetime.fromtimestamp(entry['internalDate']/1000.0)
+                    headers    = msg.get('payload', {}).get('headers', [])
+                    subject_line = next(
+                        (h['value'] for h in headers if h['name']=='Subject'),
+                        '<no-subject>'
+                    )
+                    current_ids = set(current.index)
+                    home_ids    = set(home.index)
+                    for buoy in home_ids - current_ids:
+                        if buoy not in alerted:
+                            subj = (
+                                f"Alert: Buoy {buoy} missing "
+                                f"in batch {batch_time:%Y-%m-%d %H:%M:%S}"
+                            )
+                            body = (
+                                f"Buoy {buoy} did not transmit in this batch.\n\n"
+                                f"Email Subject: {subject_line}\n"
+                                f"Batch Received: {batch_time:%Y-%m-%d %H:%M:%S}\n\n"
+                                f"Check attached CSV from the email for details."
+                            )
+                            send_notification(
+                                service, NOTIFY_EMAIL, NOTIFY_EMAIL, subj, body
+                            )
+                            alerted[buoy] = datetime.now().isoformat()
+
                 # After processing all messages, persist the updated alert-log
                 with open(ALERT_LOG_FILE, 'w') as f:
                     json.dump(alerted, f, indent=2)
@@ -321,7 +368,10 @@ def fetch_and_append():
             pd.read_csv(MASTER_CSV, parse_dates=['date_UTC'])
               .sort_values('date_UTC')
               .groupby('D_number', as_index=False)
-              .last()[['D_number','Latitude','Longitude','date_UTC']]
+              .last()[['D_number',
+                       'Latitude','Longitude',
+                       'date_UTC',
+                       'batteryState']]
         )
         latest.to_csv(os.path.join(BASE_DIR, 'latest_positions.csv'),
                       index=False)
@@ -333,18 +383,14 @@ def fetch_and_append():
         # CSV -> root of repo
         src_csv = MASTER_CSV
         dst_csv = os.path.join(repo_dir, CSV_FILE)
-        # .py script
-        src_py = PY_SCRIPT
-        dst_py = os.path.join(repo_dir, PY_SCRIPT)
         for src, dst in ((src_html, dst_html), 
-                         (src_csv, dst_csv),
-                         (src_py, dst_py)):
+                         (src_csv, dst_csv)):
             subprocess.run(['cp', src, dst], check=True)
 
         # 3) commit & push
-        commit_msg = f"Auto-update {datetime.now():%Y-%m-%d %H:%M:%S'}"
+        commit_msg = f"Auto-update {datetime.now():%Y-%m-%d %H:%M:%S}"
         cmds = [
-            ['git', 'add', 'docs/index.html', CSV_FILE, PY_SCRIPT],
+            ['git', 'add', 'docs/index.html', CSV_FILE],
             ['git', 'commit', '-m', commit_msg],
             ['git', 'push', 'origin', 'main'],
         ]
